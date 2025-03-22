@@ -1,0 +1,149 @@
+import paramiko
+import getpass
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def connect(device_ip, device_port, uname, passwd):
+    """Establish SSH connection to the Cisco router."""
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    logging.info(f"Connecting to {device_ip}...")
+
+    try:
+        ssh_client.connect(hostname=device_ip, port=device_port, username=uname, password=passwd, 
+                           look_for_keys=False, allow_agent=False)
+        return ssh_client
+    except paramiko.AuthenticationException:
+        logging.error(f"Authentication failed for {device_ip}")
+    except paramiko.SSHException as e:
+        logging.error(f"SSH connection error for {device_ip}: {e}")
+    except Exception as e:
+        logging.error(f"Connection failed for {device_ip}: {e}")
+    
+    return None
+
+def get_shell(ssh_client):
+    """Invoke an interactive shell session."""
+    return ssh_client.invoke_shell()
+
+def send_command(shell, command, timeout=1):
+    """Send a command to the router shell."""
+    logging.info(f'Sending Command: {command}')
+    shell.send(command + '\n')
+    time.sleep(timeout)
+
+def show_output(shell, n=10000):
+    """Retrieve and decode the router's output."""
+    return shell.recv(n).decode('utf-8')
+
+def close_connection(ssh_client):
+    """Close the SSH connection."""
+    if ssh_client and ssh_client.get_transport().is_active():
+        logging.info("Closing the connection...")
+        ssh_client.close()
+
+def configure_router(router_ip, username, password, enable_password):
+    """Automates the configuration of a Cisco router."""
+    client = connect(router_ip, 22, username, password)
+    if not client:
+        return
+
+    shell = get_shell(client)
+
+    # Enter enable mode
+    send_command(shell, 'enable')
+    send_command(shell, enable_password, timeout=2)
+
+    # Set terminal length to avoid pagination
+    send_command(shell, 'terminal length 0')
+
+    # Show initial router details
+    send_command(shell, 'show version')
+    send_command(shell, 'show ip int brief')
+
+    # Configure OSPF
+    send_command(shell, 'configure terminal')
+    send_command(shell, 'router ospf 1')
+    send_command(shell, 'network 0.0.0.0 255.255.255.255 area 0')
+    send_command(shell, 'exit')
+
+    # Save the configuration
+    send_command(shell, 'write memory', timeout=3)
+
+    # Show OSPF status
+    send_command(shell, 'show ip protocols')
+
+    # Configure IKEv2 VPN
+    send_command(shell, 'configure terminal')
+    send_command(shell, 'crypto ikev2 proposal VPN_PROPOSAL')
+    send_command(shell, 'encryption aes-cbc-256')
+    send_command(shell, 'integrity sha256')
+    send_command(shell, 'group 14')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'crypto ikev2 policy VPN_POLICY')
+    send_command(shell, 'proposal VPN_PROPOSAL')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'crypto ikev2 keyring VPN_KEYRING')
+    send_command(shell, 'peer REMOTE_PEER')
+    send_command(shell, 'address 0.0.0.0 0.0.0.0')  # Accept any remote peer
+    send_command(shell, 'pre-shared-key MySecretKey123')
+    send_command(shell, 'exit')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'crypto ikev2 profile VPN_PROFILE')
+    send_command(shell, 'match identity remote address 0.0.0.0 0.0.0.0')
+    send_command(shell, 'authentication remote pre-share')
+    send_command(shell, 'authentication local pre-share')
+    send_command(shell, 'keyring local VPN_KEYRING')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'crypto ipsec transform-set VPN_TRANSFORM esp-aes esp-sha-hmac')
+    send_command(shell, 'mode tunnel')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'crypto ipsec profile VPN_IPSEC_PROFILE')
+    send_command(shell, 'set transform-set VPN_TRANSFORM')
+    send_command(shell, 'set ikev2-profile VPN_PROFILE')
+    send_command(shell, 'exit')
+
+    send_command(shell, 'interface Tunnel0')
+    send_command(shell, 'ip address 192.168.100.1 255.255.255.252')
+    send_command(shell, 'tunnel source GigabitEthernet0/0')
+    send_command(shell, 'tunnel mode ipsec ipv4')
+    send_command(shell, 'tunnel destination 203.0.113.2')  # Remote VPN peer
+    send_command(shell, 'tunnel protection ipsec profile VPN_IPSEC_PROFILE')
+    send_command(shell, 'exit')
+
+    # Save the configuration again
+    send_command(shell, 'write memory', timeout=3)
+
+    # Show VPN status
+    send_command(shell, 'show crypto ikev2 sa')
+    send_command(shell, 'show crypto ipsec sa')
+
+    # Display output
+    output = show_output(shell)
+    logging.info(f"Configuration Output for {router_ip}:\n{output}")
+
+    # Close SSH connection
+    close_connection(client)
+
+if __name__ == '__main__':
+    routers = [
+        '192.168.16.100',
+        '192.168.16.101',
+        '192.168.16.102',
+        '192.168.16.103'
+    ]
+    
+    username = 'admin'
+    password = 'admin'
+    enable_password = getpass.getpass("Enter the Enable password: ")
+
+    for router in routers:
+        configure_router(router, username, password, enable_password)
