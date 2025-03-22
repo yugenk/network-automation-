@@ -1,0 +1,96 @@
+import paramiko
+import getpass
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def connect(device_ip, device_port, uname, passwd):
+    """Establish SSH connection to the MikroTik router."""
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    logging.info(f"Connecting to {device_ip}...")
+
+    try:
+        ssh_client.connect(hostname=device_ip, port=device_port, username=uname, password=passwd, 
+                           look_for_keys=False, allow_agent=False)
+        return ssh_client
+    except paramiko.AuthenticationException:
+        logging.error(f"Authentication failed for {device_ip}")
+    except paramiko.SSHException as e:
+        logging.error(f"SSH connection error for {device_ip}: {e}")
+    except Exception as e:
+        logging.error(f"Connection failed for {device_ip}: {e}")
+    
+    return None
+
+def get_shell(ssh_client):
+    """Invoke an interactive shell session."""
+    return ssh_client.invoke_shell()
+
+def send_command(shell, command, timeout=1):
+    """Send a command to the router shell."""
+    logging.info(f'Sending Command: {command}')
+    shell.send(command + '\n')
+    time.sleep(timeout)
+
+def show_output(shell, n=10000):
+    """Retrieve and decode the router's output."""
+    return shell.recv(n).decode('utf-8')
+
+def close_connection(ssh_client):
+    """Close the SSH connection."""
+    if ssh_client and ssh_client.get_transport().is_active():
+        logging.info("Closing the connection...")
+        ssh_client.close()
+
+def configure_mikrotik_hub(router_ip, username, password):
+    """Automates MGRE over IPsec VPN configuration for MikroTik Hub."""
+    client = connect(router_ip, 22, username, password)
+    if not client:
+        return
+
+    shell = get_shell(client)
+
+    # Set up IPsec Phase 1 (IKEv2 Policy)
+    send_command(shell, '/ip ipsec profile add name=ike2_profile hash-algorithm=sha256 enc-algorithm=aes-256 dh-group=modp2048')
+    send_command(shell, '/ip ipsec peer add name=all_peers address=0.0.0.0/0 exchange-mode=ike2 secret="MySecretKey123" profile=ike2_profile')
+
+    # Set up IPsec Phase 2 (IPsec Proposal & Policy)
+    send_command(shell, '/ip ipsec proposal add name=gre_proposal auth-algorithms=sha256 enc-algorithms=aes-256-cbc')
+    send_command(shell, '/ip ipsec policy add src-address=192.168.200.1 dst-address=192.168.200.0/24 sa-src-address=203.0.113.1 sa-dst-address=0.0.0.0 proposal=gre_proposal tunnel=yes')
+
+    # Create GRE Tunnel Interface for Spoke Connectivity (MGRE)
+    send_command(shell, '/interface gre add name=gre-tunnel hub=yes local-address=203.0.113.1 remote-address=0.0.0.0 keepalive=10s,5 dscp=42 mtu=1476')
+    
+    # Assign IP Address to GRE Tunnel Interface
+    send_command(shell, '/ip address add address=192.168.200.1/24 interface=gre-tunnel')
+
+    # Enable OSPF for Dynamic Routing
+    send_command(shell, '/routing ospf instance add name=ospf1 router-id=192.168.200.1')
+    send_command(shell, '/routing ospf network add network=192.168.200.0/24 area=backbone')
+
+    # Enable IPsec for GRE Tunnel
+    send_command(shell, '/ip ipsec identity add peer=all_peers auth-method=pre-shared-key secret="MySecretKey123" generate-policy=port-strict')
+    
+    # Save Configuration
+    send_command(shell, '/system script add name=save_config source="/system reboot"')
+
+    # Show IPsec and GRE Status
+    send_command(shell, '/ip ipsec active-peers print')
+    send_command(shell, '/interface gre print')
+
+    # Display output
+    output = show_output(shell)
+    logging.info(f"Configuration Output for {router_ip}:\n{output}")
+
+    # Close SSH connection
+    close_connection(client)
+
+if __name__ == "__main__":
+    router_ip = "192.168.16.100"  # MikroTik Hub IP
+    username = "admin"
+    password = getpass.getpass("Enter the MikroTik password: ")
+
+    configure_mikrotik_hub(router_ip, username, password)
