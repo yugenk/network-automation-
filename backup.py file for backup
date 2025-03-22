@@ -1,0 +1,38 @@
+import paramiko
+import getpass
+import time
+from datetime import datetime
+ssh_client=paramiko.SSHClient()
+ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ip_address='192.168.16.100'
+user_name='admin'
+pass_word='admin'
+ssh_client.connect(hostname=ip_address,port=22,username=user_name,password=pass_word,look_for_keys=False,allow_agent=False)
+if ssh_client.get_transport().is_active():
+ 
+   shell=ssh_client.invoke_shell()
+   shell.send("enable \n")
+   enablePassword=getpass.getpass("Enter the Enable password")
+   shell.send(f'{enablePassword}\n')
+   
+   time.sleep(1)
+   shell.send('terminal length 0 \n')
+   time.sleep(2)
+   shell.send("show running-config\n")
+   time.sleep(20)
+   output=shell.recv(65555).decode('utf-8')
+ 
+   output_list=output.splitlines()
+   output_list=output_list[11:-1]
+   output='\n'.join(output_list)
+   now=datetime.now()
+   year=now.year
+   month=now.month
+   day=now.day
+   file_name_user=input("Enter your Desired File Name \n")
+   newfilename=f'{file_name_user}_{year}-{month}-{day}.txt'
+   with open(newfilename,'w')as f:
+       f.write(output)
+   #print(output)
+else:
+    print("Connection Error")
